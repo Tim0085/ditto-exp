@@ -1,0 +1,25 @@
+# 只放代码：依赖、结果、数据、本机配置、密钥都不进仓库
+node_modules/
+__pycache__/
+*.pyc
+local.env
+.env
+.env.*
+.fetch-official/
+
+# Ditto 官方文件的副本不进仓库（上游没有声明许可证），用 worker-isolation/scripts/fetch-official.sh 从上游取
+worker-isolation/official/*
+!worker-isolation/official/SOURCE.md
+worker-isolation/rag-a/*
+!worker-isolation/rag-a/CHANGES.md
+worker-isolation/relaxed/*
+!worker-isolation/relaxed/CHANGES.md
+
+# 实验目录里的数据、结果、临时文件（仓库放在实验目录里用时也不会带进来）
+bench_data/
+results/
+_tmp/
+*.sqlite
+*.sqlite-*
+*.xlsx
+*.gz

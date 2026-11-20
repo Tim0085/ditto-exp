@@ -1,0 +1,46 @@
+--- official/examples/_shared/tools/rag/domain.ts
++++ relaxed/examples/_shared/tools/rag/domain.ts
+@@ -18,14 +18,14 @@
+ }
+ export function request(v: unknown): Request {
+   const r = object(v);
+-  const sourceIds = strings(r.sourceIds, 20).map(identifier);
++  const sourceIds = strings(r.sourceIds, Infinity).map(identifier);
+   if (!sourceIds.length || new Set(sourceIds).size !== sourceIds.length)
+     throw new Error("Invalid sources");
+   return {
+     id: identifier(r.id),
+     tenant: identifier(r.tenant),
+     principal: identifier(r.principal),
+-    question: text(r.question, 1200),
++    question: text(r.question, Infinity),
+     sourceIds,
+   };
+ }
+@@ -82,7 +82,7 @@
+   text: string;
+ }
+ export function chunks(source: Source, raw: string): Chunk[] {
+-  if (!raw.trim() || raw.length > 100_000)
++  if (!raw.trim() || raw.length > Infinity)
+     throw new Error("Document must contain 1–100000 characters");
+   const snapshot = digest(raw),
+     lines = raw.split("\n"),
+@@ -107,7 +107,7 @@
+     group = [];
+   };
+   lines.forEach((line, i) => {
+-    if (line.length > 1600)
++    if (line.length > Infinity)
+       throw new Error(
+         "Normalize long lines before ingestion (maximum 1600 characters)",
+       );
+@@ -120,7 +120,7 @@
+     group.push(line);
+   });
+   flush();
+-  if (result.length > 200) throw new Error("Too many document chunks");
++  if (result.length > Infinity) throw new Error("Too many document chunks");
+   return result;
+ }
+ export interface Report {

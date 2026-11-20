@@ -1,0 +1,22 @@
+--- official/examples/_shared/tools/storage/sql-memory.ts
++++ relaxed/examples/_shared/tools/storage/sql-memory.ts
+@@ -1,4 +1,9 @@
+-import { randomUUID } from "node:crypto";
++import { createHash, randomUUID } from "node:crypto";
++/** 由 key 得到固定的 UUID，和官方 qdrant-memory.ts 的 memoryPointId 逐字相同（本实验为可复现而加，见 relaxed/CHANGES.md）。 */
++export function memoryPointId(key: string) {
++  const bytes = createHash("sha256").update(key).digest().subarray(0, 16); bytes[6] = (bytes[6]! & 15) | 80; bytes[8] = (bytes[8]! & 63) | 128;
++  const hex = bytes.toString("hex"); return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
++}
+ import { MemoryError, type MemoryItem, type MemoryStore, type MemorySearchProvider } from "@codesoul-co/ditto/worker/memory";
+ 
+ export type Row = { id: string; memory_key: string | null; content: string; metadata: string | null };
+@@ -63,7 +68,7 @@
+       return rows.map(row => ({ memory: map(row) })); // Database substring matching, not vector ranking.
+     },
+     async write(input) {
+-      const items = input.memories.map(memory => ({ ...memory, id: randomUUID() }));
++      const items = input.memories.map(memory => ({ ...memory, id: memory.key ? memoryPointId(memory.key) : randomUUID() }));
+       return database.transaction(async rows => {
+         const saved: MemoryItem[] = [];
+         for (const item of items) {

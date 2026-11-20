@@ -1,0 +1,20 @@
+--- official/examples/_shared/tools/rag/domain.ts
++++ rag-a/examples/_shared/tools/rag/domain.ts
+@@ -18,7 +18,7 @@
+ }
+ export function request(v: unknown): Request {
+   const r = object(v);
+-  const sourceIds = strings(r.sourceIds, 20).map(identifier);
++  const sourceIds = strings(r.sourceIds, 100).map(identifier);
+   if (!sourceIds.length || new Set(sourceIds).size !== sourceIds.length)
+     throw new Error("Invalid sources");
+   return {
+@@ -120,7 +120,7 @@
+     group.push(line);
+   });
+   flush();
+-  if (result.length > 200) throw new Error("Too many document chunks");
++  if (result.length > 400) throw new Error("Too many document chunks");
+   return result;
+ }
+ export interface Report {

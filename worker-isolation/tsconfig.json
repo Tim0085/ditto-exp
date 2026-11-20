@@ -1,0 +1,18 @@
+{
+  "//": "只做类型检查（node 直接按 .ts 运行，靠类型擦除，不编译）。用实验包 01_bfcl_multiturn 里现成的 TypeScript 5.9.3。",
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2024"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "allowJs": false
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
+}
