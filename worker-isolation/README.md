@@ -25,7 +25,7 @@
 | `scripts/fetch-official.sh` | 从上游取 Ditto 官方文件（仓库里不放副本），套上 `patches/` 里的改动，逐个核对 SHA-256 |
 | `scripts/sync-repo.sh` | 实验目录 → 本仓库的同步（只复制代码，同步后查敏感内容） |
 | `tests/` | 测试（不联网、不碰 Docker）：Direct 和 Monolithic 请求逐字相同、出口记账和重试、rag 的数据和失败分类等 |
-| `report/` | 阶段汇报用的结果表格的生成程序 |
+| `report/` | 结论程序（按跑之前写定的判据出结论表）和阶段汇报的表格、图的生成程序 |
 | `patches/` | 本实验对官方文件的改动（`MANIFEST` 列出每个文件从上游哪里来、套哪个补丁；`SHA256SUMS` 是实验时用的文件的摘要） |
 | `official/SOURCE.md`、`rag-a/CHANGES.md`、`relaxed/CHANGES.md` | 官方文件的来源和改动说明 |
 
