@@ -67,7 +67,14 @@ const server = createServer(async (req, res) => {
       : system === KEYWORD_INSTRUCTION ? "keyword" : system === ANSWER_INSTRUCTION ? "answer" : "unknown";
     if (kind === "unknown") throw new Error("unknown prompt");
     // 题号写在请求里（[task:xxx]），两种布局相同；rag 用问题文字的哈希。
-    const task = rag ? rag.task : viaEgress ? `rid:${viaEgress[1]}` : /\[task:([^\]]+)\]/.exec(user)?.[1] ?? "?";
+    // 经出口转来的 S4 请求：出口加的 Request ID 每格都不同（防缓存编号），改用问题文字的哈希认题，
+    // 同一题同一步在各格等一样久（离线并发扫描，docs\32 第 10 节；离线演练延迟为 0，不受影响）。认不出问题时仍用 Request ID。
+    // 回答一步的问题在模板最后（历史对话里也可能出现 “Question: ”，取最后一处）。
+    const at = first.lastIndexOf("\nQuestion: ");
+    const s4Question = !viaEgress || rag ? undefined : kind === "keyword" ? /^Question: ([\s\S]*)$/.exec(user)?.[1]
+      : at >= 0 && first.endsWith("\nAnswer:") ? first.slice(at + "\nQuestion: ".length, -"\nAnswer:".length) : undefined;
+    const task = rag ? rag.task : viaEgress ? (s4Question === undefined ? `rid:${viaEgress[1]}` : `q:${sha256(s4Question).slice(0, 16)}`)
+      : /\[task:([^\]]+)\]/.exec(user)?.[1] ?? "?";
     let content = rag ? rag.content : ANSWER;
     if (kind === "keyword") {
       const question = viaEgress ? /Question: ([\s\S]*)$/.exec(user)?.[1] ?? "" : /\[question:([\s\S]*?)\]\[\/question\]/.exec(user)?.[1] ?? "";
@@ -94,4 +101,5 @@ const server = createServer(async (req, res) => {
   }
 });
 server.keepAliveTimeout = 600_000;
-server.listen(Number(arg("port", "8080")), "0.0.0.0", () => console.log(`fake-model listening ${arg("port", "8080")}`));
+// 启动时把设定（延迟中位数、离散度、种子）打进日志：经出口跑的格子里只记得到出口的设定，扫描脚本从这一行留底
+server.listen(Number(arg("port", "8080")), "0.0.0.0", () => console.log(`fake-model listening ${arg("port", "8080")} ${JSON.stringify(settings)}`));

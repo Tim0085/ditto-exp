@@ -5,7 +5,7 @@
 - **合并对照**：MEMORY 和 CONTEXT 合进同一个独立进程。隔离的收益如果来自“每个重的 Worker 各占一条主线程”，合并以后收益应当消失。
 - **Direct**：不经过 Ditto 的 Runtime、Graph、Loop 和 Worker 调度，同样的步骤写成普通函数在一个进程里直接调用（`src/direct.ts`），底层（CONTEXT、MEMORY、INFER 的处理函数，官方 SQLite 记忆、RagAdapters、BM25）和 Monolithic 相同，发给模型的请求逐字相同。Monolithic 对 Direct 是框架本身的代价。
 
-数据：LongMemEval_S 全部 500 题（按固定种子打乱的顺序）。两个场景：
+数据：LongMemEval_S 全部 500 题，按固定种子 42 打乱顺序（mulberry32）。更早的几轮用的是种子 20261119，那份数据也留着。两个场景：
 
 | 场景 | 流程 | 布局 |
 | --- | --- | --- |
@@ -21,6 +21,7 @@
 | `src/` | 全部程序。先看 [代码导读.md](代码导读.md) |
 | `scripts/real.sh` | 真实模型运行的一键脚本：`check`、`run`、`judge`、`rehearse`（离线演练）、`down` |
 | `scripts/run.sh` | 全部容器命令（网络、假模型、Redis、建库、单格运行） |
+| `scripts/sweep.sh` | 离线并发扫描的一键脚本：`run`、`report`、`down`。用假模型，在不同并发下测各布局的吞吐，用来定正式实验的并发 |
 | `scripts/fetch-official.sh` | 从上游取 Ditto 官方文件（仓库里不放副本），套上 `patches/` 里的改动，逐个核对 SHA-256 |
 | `scripts/sync-repo.sh` | 实验目录 → 本仓库的同步（只复制代码，同步后查敏感内容） |
 | `tests/` | 测试（不联网、不碰 Docker）：Direct 和 Monolithic 请求逐字相同、出口记账和重试、rag 的数据和失败分类等 |
@@ -35,7 +36,13 @@
 1. Node 24.14（本机和容器里），Python 3.12（判分、汇总；汇总要 openpyxl）。容器镜像：任何带 `/usr/local/bin/node`（24.14）的镜像，把 `scripts/run.sh`、`scripts/real.sh` 里的 `IMAGE` 换成它；rag 另要 `redis:7-alpine`。
 2. 依赖：`npm install`（`@codesoul-co/ditto` 0.1.5、`@codesoul-co/ditto-retrieval` 0.1.0、`yaml` 2.9.1；类型检查用 `typescript` 5.9.3、`@types/node`）。
 3. 官方文件：`bash scripts/fetch-official.sh`。
-4. 数据：LongMemEval_S（`longmemeval_s_cleaned.json`）放进 `../bench_data/longmemeval-s/`，然后依次跑 `src/prepare.ts`、`src/sample.ts`、`src/sample500.ts`、`src/prepare-rag.ts --cut a --prefix rag-a-all500`（各文件开头写了参数）。
+4. 数据：把 LongMemEval_S（`longmemeval_s_cleaned.json`）放进 `../bench_data/longmemeval-s/`，然后依次跑下面几个程序，参数写在各文件开头：
+   - `src/prepare.ts`；
+   - `src/sample.ts --seed 42 --out ../bench_data/longmemeval-s/derived/s42`；
+   - `src/sample500.ts --dir ../bench_data/longmemeval-s/derived/s42`；
+   - `src/prepare-rag.ts --cut a`，题目是 s42 里的前 200 题和全部 500 题各跑一次，后者加 `--prefix rag-a-all500`。
+
+   `sample.ts` 不带参数时，生成更早几轮用的种子 20261119 的数据。生成数据的程序都不会覆盖已有的文件。
 5. 本机配置：把 `local.env.example` 复制成 `local.env` 填好（DeepSeek 密钥开头几位、密钥文件和 GPT-4o 文件的位置等；`local.env` 不进 git）。
 
 ## 运行
@@ -43,10 +50,15 @@
 ```bash
 bash scripts/real.sh check full-s4      # 开跑前检查，不花钱
 bash scripts/real.sh rehearse full-s4   # 离线演练：假模型，不联网、不花钱
-bash scripts/real.sh run full-s4        # S4 全量：12 格 × 500 题
-bash scripts/real.sh run full-rag       # rag 全量：6 格 × 500 题
+bash scripts/real.sh run full-s4        # S4 全量：12 格 × 500 题，之后 python -I report/full_criteria.py <结果目录>
+bash scripts/real.sh run full-rag       # rag 全量：6 格 × 500 题，之后同上
+bash scripts/real.sh run rag-s42        # 种子对照：rag 8 格 × 200 题（种子 42），之后 python -I report/seed_compare.py
+bash scripts/real.sh run low-s42        # 低并发组：S4 4 种布局 × 2 轮，并发 2，每格 200 题（种子 42），之后 python -I report/low_criteria.py
 bash scripts/real.sh down               # 中途停
+bash scripts/sweep.sh run               # 离线并发扫描：假模型，不联网、不花钱，约 11 小时；断了再跑就接着跑
 ```
+
+上面几轮都已跑完。为了不改写已有的结果，`run`、`judge` 默认不让跑这几轮，确实要重跑得加 `MEM_FORCE=1`；离线演练（`rehearse`）不受限。
 
 中途断了再跑 `run` 就接着跑（已验收的格子跳过）。每轮的结果目录里有：每格的原始记录（每题、每个模型请求、每次调用的用时、每 5 秒的资源读数、rag 每题的完整报告）、出口的账本和完整请求、回复、判分原文、汇总表和详细分析、运行环境（`run-info.json`）。
 

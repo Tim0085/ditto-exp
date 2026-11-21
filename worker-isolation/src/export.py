@@ -3,7 +3,10 @@
     python -I src/export.py <阶段三原始记录目录> <输出目录>
 
 每格：
-- 吞吐：稳态窗口内完成的题数 / 窗口时长（窗口 = 第 warmup 题完成 → 最后一题派发，run.ts 里算好）；
+- 吞吐：稳态窗口内完成的题数 / 窗口时长（窗口 = 第 warmup 题完成 → 最后一题派发，run.ts 里算好）；这是“两点法”。
+  另有“整波平均”（throughput_phase_avg，docs\\34 第 3.1 节；离线并发扫描判断用的就是它）：题是一波一波（每波约“并发”道）
+  做完的，只用窗口两头两个时刻算，读数取决于两头落在波的什么位置。所以窗口起点取遍第 warmup 到第 warmup + 并发 − 1 次做完，
+  各段长度相同，合起来算。成对比较里两种都列（*_throughput_phase、throughput_gain_phase）；
 - 每题用时 p50/p95/p99/平均：窗口内完成的题；
 - 失败题数（全部题）；
 - 各进程：主线程忙的比例、容器用掉的核数、事件循环延迟 p99、容器内存峰值；
@@ -35,6 +38,26 @@ def pct(xs, p):
     return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
 
 
+def phase_throughput(d):
+    """整波平均的吞吐（题/秒）。和 src\\sweep_report.py 的 phase_tp 算法相同，只是这里也处理失败的题（真实运行里有）：
+    完成次数照 run.ts 派题的算法数，失败的题也算一次完成（最后一题在第 题数 − 并发 次完成时派出）；吞吐只计成功的题（和两点法一样）。
+    窗口起点 s 取遍第 warmup 到第 warmup + c − 1 次完成（c 是并发），每段从第 s 次完成到第 s + L 次完成，
+    L = 题数 − c − warmup − c，都在最后一题派出之前；吞吐 = 各段里成功的题数之和 ÷ 各段用时之和。题数不够或记录不全时是 None。"""
+    m = d["meta"]
+    c, n, warm = m["concurrency"], m["count"], m["warmup"]
+    ends = sorted((t["end_ms"], t["ok"]) for t in d["tasks"])
+    span = n - c - warm - c
+    if span < 1 or warm < 1 or len(ends) != n:
+        return None
+    ok_before = [0]  # ok_before[k]：前 k 次完成里成功的题数
+    for _, good in ends:
+        ok_before.append(ok_before[-1] + (1 if good else 0))
+    starts = range(warm, warm + c)
+    elapsed = sum(ends[s + span - 1][0] - ends[s - 1][0] for s in starts)
+    good = sum(ok_before[s + span] - ok_before[s] for s in starts)
+    return good / (elapsed / 1000) if elapsed > 0 else None
+
+
 cells, fakes = [], {}
 for path in sorted(RAW.glob("*.json")):
     d = json.loads(path.read_text(encoding="utf-8"))
@@ -47,6 +70,7 @@ for path in sorted(RAW.glob("*.json")):
            "concurrency": m["concurrency"], "tasks": len(d["tasks"]), "failed": sum(1 for t in d["tasks"] if not t["ok"]),
            "first_error": next((t.get("error") for t in d["tasks"] if not t["ok"]), ""),
            "steady_completed": len(steady), "throughput_per_s": w["throughput_per_s"] if w else None,
+           "throughput_phase_avg": phase_throughput(d) if w else None,
            "latency_mean_ms": statistics.mean(lat) if lat else None, "latency_p50_ms": pct(lat, 50),
            "latency_p95_ms": pct(lat, 95), "latency_p99_ms": pct(lat, 99), "window_s": (w["to_ms"] - w["from_ms"]) / 1000 if w else None,
            "fake_peak_active": d["fake"]["peakActive"], "fake_errors": d["fake"]["errors"], "real_model_calls": d["fake"]["realModelCalls"]}
@@ -110,6 +134,8 @@ for r in cells:
     pairs.append({"group": r["group"], "round": r["round"], "concurrency": r["concurrency"], "cores": r["cores"], "layout": r["layout"],
                   "mono_throughput": base["throughput_per_s"], "split_throughput": r["throughput_per_s"],
                   "throughput_gain": gain(r["throughput_per_s"], base["throughput_per_s"]),
+                  "mono_throughput_phase": base["throughput_phase_avg"], "split_throughput_phase": r["throughput_phase_avg"],
+                  "throughput_gain_phase": gain(r["throughput_phase_avg"], base["throughput_phase_avg"]),
                   "mono_p95_ms": base["latency_p95_ms"], "split_p95_ms": r["latency_p95_ms"],
                   "p95_cut": (1 - r["latency_p95_ms"] / base["latency_p95_ms"]) if r["latency_p95_ms"] and base["latency_p95_ms"] else None,
                   "mono_mean_ms": base["latency_mean_ms"], "split_mean_ms": r["latency_mean_ms"],
@@ -129,6 +155,8 @@ for r in cells:
     pairs_direct.append({"group": r["group"], "round": r["round"], "concurrency": r["concurrency"], "cores": r["cores"], "layout": r["layout"],
                          "direct_throughput": base["throughput_per_s"], "layout_throughput": r["throughput_per_s"],
                          "throughput_gain": gain(r["throughput_per_s"], base["throughput_per_s"]),
+                         "direct_throughput_phase": base["throughput_phase_avg"], "layout_throughput_phase": r["throughput_phase_avg"],
+                         "throughput_gain_phase": gain(r["throughput_phase_avg"], base["throughput_phase_avg"]),
                          "direct_p95_ms": base["latency_p95_ms"], "layout_p95_ms": r["latency_p95_ms"],
                          "p95_cut": (1 - r["latency_p95_ms"] / base["latency_p95_ms"]) if r["latency_p95_ms"] and base["latency_p95_ms"] else None,
                          "direct_mean_ms": base["latency_mean_ms"], "layout_mean_ms": r["latency_mean_ms"],
@@ -146,9 +174,11 @@ def pooled(rows, base_key, layout_key):
             continue
         mean = lambda k: statistics.mean(r[k] for r in rs) if all(r[k] is not None for r in rs) else None
         b, l = mean(f"{base_key}_throughput"), mean(f"{layout_key}_throughput")
+        bph, lph = mean(f"{base_key}_throughput_phase"), mean(f"{layout_key}_throughput_phase")
         bp, lp = mean(f"{base_key}_p95_ms"), mean(f"{layout_key}_p95_ms")
         out.append({"group": group, "round": "两轮合并（" + "+".join(r["round"] for r in rs) + "）", "concurrency": conc, "cores": cores, "layout": layout,
                     f"{base_key}_throughput": b, f"{layout_key}_throughput": l, "throughput_gain": gain(l, b),
+                    f"{base_key}_throughput_phase": bph, f"{layout_key}_throughput_phase": lph, "throughput_gain_phase": gain(lph, bph),
                     f"{base_key}_p95_ms": bp, f"{layout_key}_p95_ms": lp, "p95_cut": (1 - lp / bp) if lp and bp else None,
                     f"{base_key}_mean_ms": mean(f"{base_key}_mean_ms"), f"{layout_key}_mean_ms": mean(f"{layout_key}_mean_ms"),
                     "requests_same": "", f"failed_{base_key}": sum(r[f"failed_{base_key}"] for r in rs), f"failed_{layout_key}": sum(r[f"failed_{layout_key}"] for r in rs)})
@@ -169,6 +199,8 @@ for r in cells:
     pairs_memctx.append({"group": r["group"], "round": r["round"], "concurrency": r["concurrency"], "cores": r["cores"], "layout": r["layout"],
                          "both_throughput": base["throughput_per_s"], "memctx_throughput": r["throughput_per_s"],
                          "throughput_gain": gain(r["throughput_per_s"], base["throughput_per_s"]),
+                         "both_throughput_phase": base["throughput_phase_avg"], "memctx_throughput_phase": r["throughput_phase_avg"],
+                         "throughput_gain_phase": gain(r["throughput_phase_avg"], base["throughput_phase_avg"]),
                          "both_p95_ms": base["latency_p95_ms"], "memctx_p95_ms": r["latency_p95_ms"],
                          "p95_cut": (1 - r["latency_p95_ms"] / base["latency_p95_ms"]) if r["latency_p95_ms"] and base["latency_p95_ms"] else None,
                          "both_mean_ms": base["latency_mean_ms"], "memctx_mean_ms": r["latency_mean_ms"],

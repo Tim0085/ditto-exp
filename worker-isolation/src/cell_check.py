@@ -8,6 +8,10 @@
     python -I src/cell_check.py rehearsal <演练结果目录>
         离线演练（假模型的回复固定）：各格每题每一步发给出口的请求逐字相同（出口加防缓存编号之前），每题结果相同，
         rag 每题的官方报告逐字相同，每题都跑完。有一处不同就退出码 1。
+    python -I src/cell_check.py sweep <离线并发扫描某一场景的结果目录>
+        离线并发扫描（docs\\34 第 2.1 节）：各格题数不同（窗口终点 + 并发），按题比——凡是含这道题的格子（只算通过验收的），
+        这道题每一步发给出口的请求（步骤的集合和每步的摘要，多一步、少一步都算不同）、这道题的结果、rag 报告都要逐字相同。
+        结果写进 <目录>\\sweep-check.json（状态、核对了哪些格子及其摘要），汇总据此判断核对是否作数。
 
 validate 的检查（docs\\31 第 4 节“一格作废”）：模型上游、设定（场景、题数、并发、布局、轮名、热身、格子名）、
 每个序号恰好一题且题号不重复、没有思考内容、费用算得出（冒烟另要求每个成功请求都算得出）、回复了却算不出费用的尝试、
@@ -199,6 +203,82 @@ def rehearsal(out):
     return 0
 
 
+def sweep(out):
+    """离线并发扫描的严格核对（docs\\34 第 2.1 节）。假模型的回复固定、延迟按题固定，同一道题在哪一格做都应当一模一样。
+    只看通过验收的格子（有 .ok、摘要对得上）。按题比：每道题拿第一个含它的格子（按题数从少到多）当参照，和其余含它的格子逐一比。"""
+    raw = Path(out, "raw")
+    cells = {}
+    for p in sorted(raw.glob("*.json")):
+        h = hashlib.sha256(p.read_bytes()).hexdigest()
+        mark = p.with_suffix(".ok")
+        try:
+            if not mark.exists() or json.loads(mark.read_text(encoding="utf-8")).get("sha256") != h:
+                continue  # 没验收的不算
+        except ValueError:
+            continue
+        d = load(p)
+        steps = {}
+        for r in own_rows(d, p.stem):
+            per = steps.setdefault(r["task"], {})
+            if r["kind"] in per:
+                print(f"{p.stem}：同一（题、步骤）记了两次 {(r['task'], r['kind'])}")
+                return 1
+            per[r["kind"]] = r["sha256"]
+        res = {t["i"]: (t["id"], t["ok"], t.get("answer"), t.get("finishReason"), t.get("queries"), t.get("hits"),
+                        t.get("ragStatus"), t.get("evidence"), t.get("claims")) for t in d["tasks"]}
+        reports = {}
+        extras = d["meta"].get("extras") or {}
+        if "reports.jsonl.gz" in extras:
+            for l in gzip.decompress(p.with_name(extras["reports.jsonl.gz"]["file"]).read_bytes()).decode("utf-8").split("\n"):
+                if l.strip():
+                    r = json.loads(l)
+                    reports[r["i"]] = json.dumps(r["report"], ensure_ascii=False, sort_keys=False)
+        cells[p.stem] = {"hash": h, "layout": d["meta"]["layout"], "n": len(d["tasks"]), "steps": steps, "res": res, "reports": reports,
+                         "failed": [t["i"] for t in d["tasks"] if not t["ok"]]}
+    if len(cells) < 2:
+        print(f"{raw} 里通过验收的只有 {len(cells)} 格，没法比")
+        verdict = "fail"
+    else:
+        order = sorted(cells, key=lambda n: (cells[n]["n"], n))
+        bad = 0
+        for n in order:
+            if cells[n]["failed"]:
+                print(f"{n}（{cells[n]['layout']}）：有题没跑完 {cells[n]['failed'][:5]}")
+                bad += 1
+
+        def compare(what, part):
+            """part：每格的 {键: 值}。每个键拿第一个含它的格子当参照，其余含它的格子逐一比。返回（不同的处数，键数，只在一格出现的键数）。"""
+            ref, seen, diffs = {}, {}, 0
+            for n in order:
+                for k, v in cells[n][part].items():
+                    seen[k] = seen.get(k, 0) + 1
+                    if k not in ref:
+                        ref[k] = (n, v)
+                    elif ref[k][1] != v:
+                        diffs += 1
+                        if diffs <= 3:
+                            print(f"{n}（{cells[n]['layout']}）对 {ref[k][0]}（{cells[ref[k][0]]['layout']}）：{what}不同，{k}")
+            return diffs, len(ref), sum(1 for v in seen.values() if v == 1)
+
+        sd, ns, ns1 = compare("这道题发给出口的请求（步骤或摘要）", "steps")
+        rd, nr, nr1 = compare("这道题的结果", "res")
+        pd, nrep, _ = compare("这道题的 rag 报告", "reports")
+        bad += sd + rd + pd
+        layouts = sorted({c["layout"] for c in cells.values()})
+        if bad:
+            print(f"离线并发扫描核对没过：{bad} 处不同（见上面，每类最多列 3 处）")
+            verdict = "fail"
+        else:
+            print(f"离线并发扫描核对通过：{len(cells)} 格（{', '.join(layouts)}），每格 {cells[order[0]]['n']} 到 {cells[order[-1]]['n']} 题；"
+                  f"按题比了 {nr} 道题（{ns} 组请求{f'、{nrep} 份 rag 报告' if nrep else ''}），凡是含同一道题的格子，"
+                  f"这道题每一步发给出口的请求（出口加防缓存编号之前）、结果{'、rag 报告' if nrep else ''}都逐字相同，全部跑完。"
+                  f"只在一格里出现、没得比的题 {nr1} 道")
+            verdict = "pass"
+    Path(out, "sweep-check.json").write_text(json.dumps({"status": verdict, "cells": {n: c["hash"] for n, c in cells.items()}},
+                                                          ensure_ascii=False, indent=1), encoding="utf-8")
+    return 0 if verdict == "pass" else 1
+
+
 if __name__ == "__main__":
     cmd, args = sys.argv[1], sys.argv[2:]
     if cmd == "validate":
@@ -210,4 +290,6 @@ if __name__ == "__main__":
         sys.exit(1 if problems else 0)
     if cmd == "rehearsal":
         sys.exit(rehearsal(args[0]))
+    if cmd == "sweep":
+        sys.exit(sweep(args[0]))
     raise SystemExit(f"不认识的命令 {cmd}")

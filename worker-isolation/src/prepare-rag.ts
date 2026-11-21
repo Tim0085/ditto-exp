@@ -2,7 +2,9 @@
 //
 //   node src/prepare-rag.ts --cut a --tasks ../bench_data/longmemeval-s/derived/memctx-lme-first200.jsonl --out ../bench_data/longmemeval-s/derived
 //   node src/prepare-rag.ts --cut a --tasks ../bench_data/longmemeval-s/derived/memctx-lme-all500.jsonl --out ../bench_data/longmemeval-s/derived --prefix rag-a-all500
+//   种子 42（docs\32）：--tasks 和 --out 换成 derived/s42/ 下的（例如 --tasks ../bench_data/longmemeval-s/derived/s42/memctx-lme-first200.jsonl --out ../bench_data/longmemeval-s/derived/s42）
 //
+// 要写的文件已经存在时，内容相同就不重写，不同就报错停下（common.ts 的 writeNew）：已有的数据不会被换掉。
 // --cut a：切法 (a)，一段对话一个来源（正式用这个），输出文件名前缀 rag-a-first200；
 // --cut b：切法 (b)，相邻对话合并成 ≤20 个来源（11-19 的离线测量），前缀 rag-lme-first200。两种切法见 rag-sources.ts。
 // --prefix：换输出文件名前缀。全量 500 题（docs\31）用 rag-a-all500，输入是 S4 全量用的 memctx-lme-all500.jsonl（前 200 题和 first200 相同）。
@@ -11,10 +13,9 @@
 //   <前缀>.knowledge.jsonl  每条内部知识一行（key、content），build-rag-store.ts 写进 MEMORY
 //   <前缀>.manifest.json    统计：来源数、字数、块数、折行数，以及每条上限是否都守住
 // 每道题都用官方的 request()、sources()、chunks() 原样校验（切法 (a) 用 rag-a\ 的副本），任何一条不过就停下。
-import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildRagTask, buildRagTaskA, MAX_CHUNKS, MAX_CHUNKS_A, MAX_SOURCE_CHARS, MAX_SOURCES, MAX_SOURCES_A, type LmeInput } from "./rag-sources.ts";
-import { arg, jsonLines, sha256 } from "./common.ts";
+import { arg, jsonLines, sha256, writeNew } from "./common.ts";
 
 const cut = arg("cut");
 if (cut !== "a" && cut !== "b") throw new Error("--cut 是 a 或 b");
@@ -65,7 +66,7 @@ const manifest = {
   knowledge_records: knowledge.length,
   sha256: { tasks: sha256(tasks.join("\n") + "\n"), knowledge: sha256(knowledge.join("\n") + "\n") },
 };
-writeFileSync(join(outDir, `${prefix}.jsonl`), tasks.join("\n") + "\n");
-writeFileSync(join(outDir, `${prefix}.knowledge.jsonl`), knowledge.join("\n") + "\n");
-writeFileSync(join(outDir, `${prefix}.manifest.json`), JSON.stringify(manifest, null, 1) + "\n");
+writeNew(join(outDir, `${prefix}.jsonl`), tasks.join("\n") + "\n");
+writeNew(join(outDir, `${prefix}.knowledge.jsonl`), knowledge.join("\n") + "\n");
+writeNew(join(outDir, `${prefix}.manifest.json`), JSON.stringify(manifest, null, 1) + "\n");
 console.log(JSON.stringify(manifest));

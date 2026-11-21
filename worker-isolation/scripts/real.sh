@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 # 真实模型运行。在 Git Bash 里跑，第二个参数指明哪一轮：
-#   full-s4：全量 500 题的 S4（docs\31）。12 格，并发 37，每格 500 题、热身 20：Monolithic、Direct、拆 MEMORY、拆 CONTEXT、
-#            两个都拆、MEMORY 和 CONTEXT 合进一个进程（合并对照），然后倒过来再跑一遍。结果 results\full-s4-500，账本单独记，上限 400 元
-#   full-rag：全量 500 题的官方 rag-qa（切法 (a)，docs\31）。6 格，并发 37：Monolithic、Direct、拆 INTERACTION+RETRIEVAL，再倒过来一遍。
-#            结果 results\full-rag-500，账本单独记，上限 400 元。要 Redis（照官方放 CONTEXT），脚本自己起
+#   full-s4：全量 500 题的 S4（docs\31；题目顺序用种子 42，docs\32）。12 格，并发 36，每格 500 题、热身 20：Monolithic、Direct、拆 MEMORY、拆 CONTEXT、
+#            两个都拆、MEMORY 和 CONTEXT 合进一个进程（合并对照），然后倒过来再跑一遍。并发 36 是离线并发扫描定的（docs\34 第 7 节）。
+#            结果 results\full-s4-500-s42，账本单独记，上限 400 元。11-21 15:32–17:31 已跑完、已汇总（docs\36），默认不让 run、judge
+#   full-rag：全量 500 题的官方 rag-qa（切法 (a)，docs\31；种子 42）。6 格，并发 36：Monolithic、Direct、拆 INTERACTION+RETRIEVAL，再倒过来一遍。
+#            结果 results\full-rag-500-s42，账本单独记，上限 400 元。要 Redis（照官方放 CONTEXT），脚本自己起。
+#            11-21 17:31–18:26 已跑完、已汇总（docs\36），默认不让 run、judge
+#   rag-s42：种子对照（docs\32 第 4 节）。和下面的 rag 一轮设定完全相同（8 格，并发 16、37），只换成种子 42 的前 200 题。
+#            结果 results\rag-real-a-s42，账本单独记，上限 60 元。11-20 18:01–18:37 已跑完、已汇总（docs\33），默认不让 run、judge
+#   low-s42：真实模型低并发组（docs\35）。S4，并发 2，8 格：Monolithic、Direct、拆 MEMORY、两个都拆，再倒过来一遍；
+#            每格种子 42 的前 200 题、热身 20。结果 results\s4-real-low-s42，账本单独记，上限 120 元。
+#            11-21 12:36–13:24 已跑完、已汇总，默认不让 run、judge
 #   以下几轮都已跑完、已汇总，默认不让 run、judge（frozen_guard）：
 #   mem：拆 MEMORY（docs\19 方案 A，11-19）。4 格：Monolithic、拆 MEMORY、拆 MEMORY、Monolithic。结果 results\memctx-real-s4
 #   ctx：拆 CONTEXT 和两个都拆（docs\21，11-19）。6 格：Monolithic、拆 CONTEXT、两个都拆、两个都拆、拆 CONTEXT、Monolithic。结果 results\memctx-real-s4-ctx
@@ -21,7 +28,7 @@
 #                                         不联网、不读真实密钥、不花钱
 #   bash scripts/real.sh down             停掉出口和本轮的容器、网络（中途想停就用它）
 #
-# DeepSeek 费用上限：全量两轮每轮 400 元，以前几轮每轮 100 元（LIMIT_CNY，只许调低），按高峰价记账，由出口在每次发请求前卡住；
+# DeepSeek 费用上限：全量两轮每轮 400 元，低并发组 120 元，种子对照 60 元，以前几轮每轮 100 元（LIMIT_CNY，只许调低），按高峰价记账，由出口在每次发请求前卡住；
 # 账本在这一轮结果目录的 egress\ 里，跨重跑累计。GPT-4o 判分：全量两轮不设请求次数上限，以前几轮 1500–2000 次。
 # 注意：python -I 不看 PYTHONIOENCODING，内嵌的 Python 自己把输出设成 UTF-8。
 # 中途断了，再跑一次 run：已经跑完的格子跳过；某一格失败超过 2% 会停下，那一格的结果挪进 failed\，再跑 run 会重跑它。
@@ -34,6 +41,8 @@ export MSYS_NO_PATHCONV=1 PYTHONIOENCODING=utf-8
 cd "$(dirname "$0")/.."
 # 本机配置（不进 git）：DEEPSEEK_KEY_PREFIX 等，格式见 local.env.example
 if [ -f local.env ]; then set -a; . ./local.env; set +a; fi
+# PROBE_DIR 只给离线并发扫描的新旧程序对照用（run.sh）；真实运行一律挂本目录的程序，环境里带进来的也不认
+unset PROBE_DIR
 
 # 目录都从本脚本的位置推出来：本目录（03_memctx_probe）的上一级是实验根目录（sec1-2.0）。Git Bash 的 pwd -W 给出
 # F:/... 这样 Docker 认得的写法。私密文件的位置（密钥文件、GPT-4o 文件）写在 local.env（不进 git），代码里不写。
@@ -52,33 +61,38 @@ EGRESS=sec1new-memctx-egress
 FAKE=sec1new-memctx-fake
 EGRESS_CORES=28-31          # 出口和假模型在另外的核上，不占被测的 2 个核
 CORES=4,6                   # 主测 2 核，和 docs\18 相同
+# 题目文件。原种子 20261119 的在 derived/（11-19、11-20 各轮）；种子 42 的在 derived/s42/，库在卷里的 s42/（docs\32）。
 L=/data/longmemeval-s/derived/memctx-lme-first200.jsonl
-L500=/data/longmemeval-s/derived/memctx-lme-all500.jsonl   # 全量 500 题（src\sample500.ts；前 200 题和 L 逐字节相同）
+S42=/data/longmemeval-s/derived/s42
+L500=$S42/memctx-lme-all500.jsonl   # 全量 500 题，种子 42（src\sample500.ts --dir；前 200 题和 s42 的 first200 逐字节相同）
 REDIS=sec1new-memctx-redis REDIS_CORES=26
-# 哪一轮：结果目录、格子名前缀、冒烟的布局、正式各格（布局:轮[:并发]，按顺序跑；不写并发就是 37）。
+# 哪一轮：结果目录、格子名前缀、冒烟的布局、正式各格（布局:轮[:并发]，按顺序跑；不写并发就用这一轮的 CONC：
+# 全量两轮 36、低并发组 2，以前几轮 37）。
 # 场景参数、库文件和建库命令默认是 S4；rag 那一轮另设。冒烟、正式每格最多允许几题“模型输出不合格”（只有 rag 有这类失败）。
 PLAN=${2:-}
 SCEN=s4 SCEN_ARGS=(--scenario s4 --db /store/users-100.sqlite --tasks "$L") STORE_FILE=users-100.sqlite STORE_BUILD=(build-store)
 # 正式每格“模型输出不合格”最多占题数的百分之几；开格前账本至少剩多少元（一格的费用加上在途预扣，见 cell）；
 # 每格题数、热身题数；这一轮 DeepSeek 费用上限（元）；判分请求次数上限（0 是不设上限）。
 # REQUIRE_EXTRAS：每格必须有两个附加文件（每次调用的用时、rag 每题的报告；以前几轮没有）。
-SMOKE_MODEL_FAIL=0 FORMAL_MODEL_FAIL_PCT=0 JUDGE_MAX_CALLS=1500 MIN_CELL_CNY=30 COUNT=200 WARMUP=20 LIMIT_MAX=100 REQUIRE_EXTRAS=0
+# CONC：正式各格没写并发时用的并发（以前几轮都是 37）。
+SMOKE_MODEL_FAIL=0 FORMAL_MODEL_FAIL_PCT=0 JUDGE_MAX_CALLS=1500 MIN_CELL_CNY=30 COUNT=200 WARMUP=20 LIMIT_MAX=100 REQUIRE_EXTRAS=0 CONC=37
 case "$PLAN" in
   # 全量 500 题（docs\31）。顺序对称：前一半和后一半倒过来，时间上的漂移对各布局一样。
-  # S4 一格 500 题约 28 元（高峰价，11-19/20 每题约 0.055 元），12 格约 330 元；开格前剩 40 元足够（一格加上最多 37 个在途预扣）。
-  full-s4) RESULTS=$SEC/results/full-s4-500 GROUP=full-s4-u100
-       SCEN_ARGS=(--scenario s4 --db /store/users-100.sqlite --tasks "$L500")
+  # S4 一格 500 题约 28 元（高峰价，11-19/20 每题约 0.055 元），12 格约 330 元；开格前剩 40 元足够（一格加上最多 36 个在途预扣）。
+  full-s4) RESULTS=$SEC/results/full-s4-500-s42 GROUP=full-s4-s42-u100
+       STORE_FILE=s42/users-100.sqlite STORE_BUILD=(build-store s42)
+       SCEN_ARGS=(--scenario s4 --db /store/s42/users-100.sqlite --tasks "$L500")
        SMOKE_LAYOUTS=(mono direct split-memory split-context split-both split-memctx)
        FORMAL=(mono:r1 direct:r1 split-memory:r1 split-context:r1 split-both:r1 split-memctx:r1
                split-memctx:r2 split-both:r2 split-context:r2 split-memory:r2 direct:r2 mono:r2)
-       COUNT=500 JUDGE_MAX_CALLS=0 MIN_CELL_CNY=40 LIMIT_MAX=400 REQUIRE_EXTRAS=1 ;;
+       COUNT=500 CONC=36 JUDGE_MAX_CALLS=0 MIN_CELL_CNY=40 LIMIT_MAX=400 REQUIRE_EXTRAS=1 ;;
   # rag 一格 500 题约 10 元（11-20 每格 200 题约 3.8 元），6 格约 60 元；冒烟每布局 3 题里最多 1 题、正式每格最多一半过不了官方输出检查（同 rag）。
-  full-rag) RESULTS=$SEC/results/full-rag-500 GROUP=full-raga-u500
-       SCEN=rag STORE_FILE=rag-a-all500.sqlite STORE_BUILD=(build-rag-store a500)
-       SCEN_ARGS=(--scenario rag --db /store/rag-a-all500.sqlite --tasks /data/longmemeval-s/derived/rag-a-all500.jsonl --context-store redis)
+  full-rag) RESULTS=$SEC/results/full-rag-500-s42 GROUP=full-raga-s42-u500
+       SCEN=rag STORE_FILE=s42/rag-a-all500.sqlite STORE_BUILD=(build-rag-store a500 s42)
+       SCEN_ARGS=(--scenario rag --db /store/s42/rag-a-all500.sqlite --tasks "$S42/rag-a-all500.jsonl" --context-store redis)
        SMOKE_LAYOUTS=(mono direct split-interaction)
        FORMAL=(mono:r1 direct:r1 split-interaction:r1 split-interaction:r2 direct:r2 mono:r2)
-       SMOKE_MODEL_FAIL=1 FORMAL_MODEL_FAIL_PCT=50 COUNT=500 JUDGE_MAX_CALLS=0 MIN_CELL_CNY=20 LIMIT_MAX=400 REQUIRE_EXTRAS=1 ;;
+       SMOKE_MODEL_FAIL=1 FORMAL_MODEL_FAIL_PCT=50 COUNT=500 CONC=36 JUDGE_MAX_CALLS=0 MIN_CELL_CNY=20 LIMIT_MAX=400 REQUIRE_EXTRAS=1 ;;
   mem) RESULTS=$SEC/results/memctx-real-s4 GROUP=real-s4-u100
        SMOKE_LAYOUTS=(mono split-memory)
        FORMAL=(mono:r1 split-memory:r1 split-memory:r2 mono:r2) ;;
@@ -97,26 +111,47 @@ case "$PLAN" in
        # 8 格 1600 段回答，相同的只判一次；判分请求上限放到 2000 次（GPT-4o 约 3 美元以内）。
        # 一格约 5 元（高峰价）加上最多 37 个在途预扣（每个不到 0.2 元），开格前剩 20 元足够（S4 一格约 11 元，留的是 30 元）。
        SMOKE_MODEL_FAIL=1 FORMAL_MODEL_FAIL_PCT=50 JUDGE_MAX_CALLS=2000 MIN_CELL_CNY=20 ;;
+  # 种子对照（docs\32 第 4 节）：除了题目换成种子 42 的前 200 题（题目文件、内部知识库都是种子 42 的）、结果目录和上限，其余和 rag 一字不差。
+  # 一格约 3.9 元（高峰价）、8 格约 31 元；开格前至少剩 20 元，上限 60 元。程序是现在这一版，多记每次调用的用时和 rag 每题报告。
+  rag-s42) RESULTS=$SEC/results/rag-real-a-s42 GROUP=real-raga-s42-u200
+       SCEN=rag STORE_FILE=s42/rag-a-first200.sqlite STORE_BUILD=(build-rag-store a s42)
+       SCEN_ARGS=(--scenario rag --db /store/s42/rag-a-first200.sqlite --tasks "$S42/rag-a-first200.jsonl" --context-store redis)
+       SMOKE_LAYOUTS=(mono split-interaction)
+       FORMAL=(mono:r1:16 split-interaction:r1:16 split-interaction:r2:16 mono:r2:16 mono:r1:37 split-interaction:r1:37 split-interaction:r2:37 mono:r2:37)
+       SMOKE_MODEL_FAIL=1 FORMAL_MODEL_FAIL_PCT=50 JUDGE_MAX_CALLS=2000 MIN_CELL_CNY=20 LIMIT_MAX=60 REQUIRE_EXTRAS=1 ;;
+  # 真实模型低并发组（docs\35）：负载低时拆开有没有收益。离线并发扫描里，S4 Monolithic 的主线程在并发 2 只忙约一半（docs\34 第 7 节）。
+  # 题目是种子 42 的前 200 题（就是全量 500 题的前 200 题），库是种子 42 顺序的前 100 个用户。顺序 A B C D D C B A。
+  # 一格 200 题约 11 元（高峰价，每题约 0.054 元），8 格约 88 元；并发 2 时在途预扣只有几笔，开格前剩 30 元足够，上限 120 元。
+  # 判分：8 格 1600 段回答，相同的只判一次；判分请求上限 2000 次。
+  low-s42) RESULTS=$SEC/results/s4-real-low-s42 GROUP=real-s4low-s42-u100 CONC=2
+       STORE_FILE=s42/users-100.sqlite STORE_BUILD=(build-store s42)
+       SCEN_ARGS=(--scenario s4 --db /store/s42/users-100.sqlite --tasks "$S42/memctx-lme-first200.jsonl")
+       SMOKE_LAYOUTS=(mono direct split-memory split-both)
+       FORMAL=(mono:r1 direct:r1 split-memory:r1 split-both:r1 split-both:r2 split-memory:r2 direct:r2 mono:r2)
+       JUDGE_MAX_CALLS=2000 MIN_CELL_CNY=30 LIMIT_MAX=120 REQUIRE_EXTRAS=1 ;;
   "") RESULTS="" ;;
-  *) echo "第二个参数是 full-s4、full-rag（以及已跑完的 mem、ctx、ctx2、rag），不是 $PLAN" >&2; exit 2 ;;
+  *) echo "第二个参数是 full-s4、full-rag、low-s42、mem、ctx、ctx2、rag、rag-s42（都已跑完），不是 $PLAN" >&2; exit 2 ;;
 esac
 LIMIT_CNY=${LIMIT_CNY_ASKED:-$LIMIT_MAX}
 # rag 的详细分析要题目文件（宿主机上的路径）
-RAG_TASKS_HOST=$SEC/bench_data/longmemeval-s/derived/rag-a-first200.jsonl
-[ "$PLAN" = full-rag ] && RAG_TASKS_HOST=$SEC/bench_data/longmemeval-s/derived/rag-a-all500.jsonl
-need_plan() { [ -n "$RESULTS" ] || { echo "要指明哪一轮：bash scripts/real.sh $1 full-s4 或 full-rag（全量 500 题）；mem、ctx、ctx2、rag 已跑完" >&2; exit 2; }; }
-# mem、ctx 两轮 11-19 已跑完，ctx2、rag 11-20 已跑完，都已汇总。run、judge 会重写那里的出口日志和汇总（run 还会先发 GPT-4o 冒烟），
+case "$PLAN" in
+  full-rag) RAG_TASKS_HOST=$SEC/bench_data/longmemeval-s/derived/s42/rag-a-all500.jsonl ;;
+  rag-s42) RAG_TASKS_HOST=$SEC/bench_data/longmemeval-s/derived/s42/rag-a-first200.jsonl ;;
+  *) RAG_TASKS_HOST=$SEC/bench_data/longmemeval-s/derived/rag-a-first200.jsonl ;;
+esac
+need_plan() { [ -n "$RESULTS" ] || { echo "要指明哪一轮：bash scripts/real.sh $1 <计划>。计划有 full-s4、full-rag（全量 500 题）、low-s42、mem、ctx、ctx2、rag、rag-s42，都已跑完（run、judge 默认不让跑，演练可以）" >&2; exit 2; }; }
+# mem、ctx 两轮 11-19 已跑完，ctx2、rag、rag-s42 11-20 已跑完，low-s42、full-s4、full-rag 11-21 已跑完，都已汇总。run、judge 会重写那里的出口日志和汇总（run 还会先发 GPT-4o 冒烟），
 # 所以默认不让跑。演练（rehearse）只写 _tmp，不受限。
 frozen_guard() {
-  case "$PLAN" in mem|ctx|ctx2|rag)
+  case "$PLAN" in mem|ctx|ctx2|rag|rag-s42|low-s42|full-s4|full-rag)
     if [ "${MEM_FORCE:-}" != 1 ]; then
       echo "$PLAN 这一轮已跑完、已汇总；为了不改动它的结果目录，不执行 $1 $PLAN（确实要的话加 MEM_FORCE=1）" >&2; exit 2
     fi ;;
   esac
 }
 # 格子名带并发；判分和汇总按“轮”配对（同一轮的 Monolithic 和拆开的比），所以计划里写了并发时，轮名也带上并发（c16-r1），
-# 免得不同并发的格子配到一起。S4 那几轮没写并发，格子名、轮名和以前一样。
-cell_name() { local layout round conc; IFS=: read -r layout round conc <<< "$1"; echo "$GROUP-k2-c${conc:-37}-$layout-$round"; }
+# 免得不同并发的格子配到一起。S4 那几轮没写并发，格子名、轮名和以前一样。没写并发的格子用这一轮的 CONC。
+cell_name() { local layout round conc; IFS=: read -r layout round conc <<< "$1"; echo "$GROUP-k2-c${conc:-$CONC}-$layout-$round"; }
 round_label() { local layout round conc; IFS=: read -r layout round conc <<< "$1"; if [ -n "$conc" ]; then echo "c$conc-$round"; else echo "$round"; fi; }
 export MEMCTX_REAL=1        # 编排器和被拆的 Worker 用真实模型那一套提示词（src\common.ts）
 
@@ -257,7 +292,8 @@ cell() { # cell <目录> <名字> <布局> <并发> <题数> <热身> <组> <轮
     docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' > "$dir/$name.docker-ps.txt" 2>&1 || true
     status=$(egress_status) || die "查不到出口状态"
     if grep -q '"stopped":true' <<<"$status"; then die "出口已经停了：$status"; fi
-    # 剩余额度不够一整格（一格约 13–16 元，加上 37 个在途预扣约 11 元）就不开，免得跑到一半撞上限、整格作废。
+    # 剩余额度不够一整格就不开，免得跑到一半撞上限、整格作废。一格的费用见上面各轮的说明（S4 200 题约 11 元、500 题约 28 元），
+    # 另加在途请求的预扣（每个不到 0.3 元，并发 36 时约 10 元）。
     python -I -c "import json,sys; r=json.loads(sys.argv[1])['ledger']['remainingCny']; sys.exit(0 if r >= float(sys.argv[2]) else 1)" "$status" "$mincny" \
       || die "剩余额度不够开 $name（要至少 $mincny 元）：$status"
     say "开始 $name（$layout，并发 $c，$count 题）"
@@ -318,7 +354,7 @@ formal() { # formal [题数] [热身]：按 FORMAL 的顺序（A B B A、A B C C
     IFS=: read -r layout round conc <<< "$spec"
     # 程序或网络出错最多 2%（200 题 4 题、500 题 10 题）；“模型输出不合格”的上限按这一格的题数算
     # （演练 100 题时是 50，正式 200 题时是 100）
-    cell "$OUT/raw" "$(cell_name "$spec")" "$layout" "${conc:-37}" "$count" "$warm" "$GROUP" "$(round_label "$spec")" \
+    cell "$OUT/raw" "$(cell_name "$spec")" "$layout" "${conc:-$CONC}" "$count" "$warm" "$GROUP" "$(round_label "$spec")" \
       "$(( count * 2 / 100 ))" "$MIN_CELL_CNY" "$(( count * FORMAL_MODEL_FAIL_PCT / 100 ))"
   done
 }
@@ -393,7 +429,7 @@ stopped_guard() { [ ! -f "$LOCK/stop" ] || die "已经用 real.sh down 停下了
 case "${1:-}" in
   check)
     OUT=${RESULTS:-$SEC/_tmp/real-check}
-    check_all; say "检查都通过了，可以跑：bash scripts/real.sh run ${PLAN:-full-s4}" ;;
+    check_all; say "检查都通过了，可以跑：bash scripts/real.sh run ${PLAN:-<计划>}（没写计划时查的是原种子 S4 的库，各计划自己的库 run 时会再查、没有就建）" ;;
   run)
     need_plan run
     frozen_guard run
@@ -407,7 +443,7 @@ case "${1:-}" in
     no_other_run
     check_all
     # 运行环境和设定（docs\31）。续跑时程序文件和第一次不一样就停下（ALLOW_CODE_CHANGE=1 才继续）。
-    python -I src/run_info.py "$OUT" plan="$PLAN" formal="${FORMAL[*]}" smoke="${SMOKE_LAYOUTS[*]}" count="$COUNT" warmup="$WARMUP" \
+    python -I src/run_info.py "$OUT" plan="$PLAN" formal="${FORMAL[*]}" smoke="${SMOKE_LAYOUTS[*]}" count="$COUNT" warmup="$WARMUP" conc="$CONC" \
       cores="$CORES" limit_cny="$LIMIT_CNY" min_cell_cny="$MIN_CELL_CNY" judge_max_calls="$JUDGE_MAX_CALLS" image="$IMAGE" \
       scenario_args="${SCEN_ARGS[*]}" store="$STORE_FILE" volume="$VOL" judge_ref="$LME_RAW" mode=run \
       || die "run_info.py 没通过（见上面；程序、数据或镜像在两次 run 之间变过的话，确认无误后加 ALLOW_CODE_CHANGE=1）"
@@ -450,7 +486,7 @@ case "${1:-}" in
     # REHEARSE_FORMAL 可以只演练计划里的几格（例如 "mono:r1 direct:r1"）。
     if [ "$COUNT" = 500 ]; then R_COUNT=${REHEARSE_COUNT:-500} R_WARM=$WARMUP; else R_COUNT=${REHEARSE_COUNT:-100} R_WARM=10; fi
     if [ -n "${REHEARSE_FORMAL:-}" ]; then read -r -a FORMAL <<< "$REHEARSE_FORMAL"; fi
-    python -I src/run_info.py "$OUT" plan="$PLAN" formal="${FORMAL[*]}" smoke="${SMOKE_LAYOUTS[*]}" count="$R_COUNT" warmup="$R_WARM" \
+    python -I src/run_info.py "$OUT" plan="$PLAN" formal="${FORMAL[*]}" smoke="${SMOKE_LAYOUTS[*]}" count="$R_COUNT" warmup="$R_WARM" conc="$CONC" \
       cores="$CORES" limit_cny="$LIMIT_CNY" min_cell_cny="$MIN_CELL_CNY" judge_max_calls="$JUDGE_MAX_CALLS" image="$IMAGE" \
       scenario_args="${SCEN_ARGS[*]}" store="$STORE_FILE" volume="$VOL" judge_ref="$LME_RAW" mode=rehearse || die "run_info.py 没通过"
     docker rm -f "$FAKE" >/dev/null 2>&1 || true

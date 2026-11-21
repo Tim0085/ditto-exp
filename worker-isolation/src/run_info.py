@@ -105,15 +105,21 @@ def main():
     inside += [None] * 3
     docker = run(["docker", "info", "--format", "{{json .}}"])
     docker = json.loads(docker) if docker else {}
-    data_dir = SEC / "bench_data" / "longmemeval-s" / "derived"
     data = {}
+    data_dirs = set()
     for arg in plan.get("scenario_args", "").split():
         if arg.startswith("/data/"):
             host = SEC / "bench_data" / arg[len("/data/"):]
             data[arg] = {"sha256": sha256_file(host), "bytes": host.stat().st_size} if host.exists() else None
-    for name in ("memctx-lme-all500.manifest.json", "rag-a-all500.manifest.json"):
-        if (data_dir / name).exists():
-            data[name] = json.loads((data_dir / name).read_text(encoding="utf-8")).get("sha256")
+            data_dirs.add(host.parent)
+    # 题目文件所在目录里的清单（原种子在 derived/，种子 42 在 derived/s42/，docs\32）：记下各清单里的摘要；
+    # 种子 42 的目录另有 sample.ts 写的 sample.json（种子、顺序的摘要），原样记下
+    for d in sorted(data_dirs):
+        rel = d.relative_to(SEC / "bench_data").as_posix()
+        for m in sorted(d.glob("*.manifest.json")):
+            data[f"{rel}/{m.name}"] = json.loads(m.read_text(encoding="utf-8")).get("sha256")
+        if (d / "sample.json").exists():
+            data[f"{rel}/sample.json"] = json.loads((d / "sample.json").read_text(encoding="utf-8"))
     if plan.get("judge_ref") and Path(plan["judge_ref"]).exists():
         data["judge_ref"] = {"file": Path(plan["judge_ref"]).name, "sha256": sha256_file(plan["judge_ref"])}
     store = plan.get("store")

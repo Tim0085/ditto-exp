@@ -110,7 +110,7 @@ model_by_cell = {m["格子"]: m for m in model}
 # ---------------------------------------------------------------- 表
 
 print("## 每格\n")
-print(f"| 格子 | 布局 | 并发 | 跑完 / 失败{'（其中模型输出不合格）' if RAG else ''} | 吞吐（题/秒） | 每题用时 p50 / p95（秒） | "
+print(f"| 格子 | 布局 | 并发 | 跑完 / 失败{'（其中模型输出不合格）' if RAG else ''} | 吞吐（题/秒）：两点法 / 整波平均 | 每题用时 p50 / p95（秒） | "
       f"模型用时中位：{STEP_NAME[FIRST]} / 回答（秒） | 回答一步平均输入 token | 正确率 |")
 print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
 for c in cells:
@@ -122,8 +122,11 @@ for c in cells:
     p50 = float(c["latency_p50_ms"]) / 1000 if c["latency_p50_ms"] else None
     p95 = float(c["latency_p95_ms"]) / 1000 if c["latency_p95_ms"] else None
     print(f"| {c['cell']} | {NAME.get(c['layout'], c['layout'])} | {c['concurrency']} | {done} / {c['failed']}{f'（{model_fail}）' if RAG else ''} | "
-          f"{num(c['throughput_per_s'], '{:.3f}')} | {num(p50, '{:.1f}')} / {num(p95, '{:.1f}')} | "
+          f"{num(c['throughput_per_s'], '{:.3f}')} / {num(c.get('throughput_phase_avg'), '{:.3f}')} | {num(p50, '{:.1f}')} / {num(p95, '{:.1f}')} | "
           f"{num(m.get(STEP_NAME[FIRST] + '一步用时中位(秒)'), '{:.1f}')} / {num(m.get('回答一步用时中位(秒)'), '{:.1f}')} | {num(m['回答一步平均输入token'], '{:,.0f}')} | {accuracy} |")
+print("\n吞吐有两种算法：两点法是以前各轮用的（第 20 题做完到最后一题派出之间做完的题 ÷ 时长）；整波平均把窗口起点在一整波里每个位置"
+      "各取一次、各段合起来算（docs\\34 第 3.1 节）。题是按“并发”道一波一波做完的，两点法的读数会随窗口两头落在波的什么位置偏几个百分点；"
+      "两种算法差得多的格子要看原因。")
 
 if RAG:
     # 官方 rag-qa 的回答状态：answered（有结论）、insufficient-evidence（证据不足）、conflicting-evidence（证据冲突）、needs-clarification（要澄清）。
@@ -158,11 +161,12 @@ def same_or_dash(base_layout, p):
     return "—" if pooled_row(p) else same_steps(cell_of(base_layout, p["round"])["cell"], cell_of(p["layout"], p["round"])["cell"])
 
 print("\n## 拆开对 Monolithic（同一轮、同一并发，2 核；“两轮合并”是两轮吞吐之和的比，主数看它）\n")
-print(f"| 拆法 | 轮 | 吞吐：Monolithic → 拆开（变化） | 每题用时 p95：Monolithic → 拆开（变化） | "
+print(f"| 拆法 | 轮 | 吞吐（两点法）：Monolithic → 拆开（变化） | 吞吐（整波平均）：Monolithic → 拆开（变化） | 每题用时 p95：Monolithic → 拆开（变化） | "
       f"Ditto 发给出口的请求逐字相同（出口加防缓存编号之前）：{' / '.join(STEP_NAME[k] + '一步' for k in steps)} |")
-print("| --- | --- | --- | --- | --- |")
+print("| --- | --- | --- | --- | --- | --- |")
 for p in sorted(pairs, key=lambda p: (p["layout"], p["round"])):
     print(f"| {NAME.get(p['layout'], p['layout'])} | {p['round']} | {num(p['mono_throughput'], '{:.3f}')} → {num(p['split_throughput'], '{:.3f}')}（{pct(p['throughput_gain'])}） | "
+          f"{num(p.get('mono_throughput_phase'), '{:.3f}')} → {num(p.get('split_throughput_phase'), '{:.3f}')}（{pct(p.get('throughput_gain_phase'))}） | "
           f"{num(sec(p['mono_p95_ms']), '{:.1f}')} → {num(sec(p['split_p95_ms']), '{:.1f}')}（{pct(-float(p['p95_cut']) if p['p95_cut'] else None)}） | "
           f"{same_or_dash('mono', p)} |")
 
@@ -171,11 +175,12 @@ for p in sorted(pairs, key=lambda p: (p["layout"], p["round"])):
 pairs_direct = read_csv(OUT / "pairs-direct.csv")
 if pairs_direct:
     print("\n## 对 Direct（不经过 Ditto 运行时、仍用 Ditto 的 Worker 处理函数；同一轮、同一并发，2 核）\n")
-    print(f"| 布局 | 轮 | 吞吐：Direct → 这一布局（变化） | 每题用时 p95：Direct → 这一布局（变化） | "
+    print(f"| 布局 | 轮 | 吞吐（两点法）：Direct → 这一布局（变化） | 吞吐（整波平均）：Direct → 这一布局（变化） | 每题用时 p95：Direct → 这一布局（变化） | "
           f"请求逐字相同：{' / '.join(STEP_NAME[k] + '一步' for k in steps)} |")
-    print("| --- | --- | --- | --- | --- |")
+    print("| --- | --- | --- | --- | --- | --- |")
     for p in sorted(pairs_direct, key=lambda p: (p["layout"] != "mono", p["layout"], p["round"])):
         print(f"| {NAME.get(p['layout'], p['layout'])} | {p['round']} | {num(p['direct_throughput'], '{:.3f}')} → {num(p['layout_throughput'], '{:.3f}')}（{pct(p['throughput_gain'])}） | "
+              f"{num(p.get('direct_throughput_phase'), '{:.3f}')} → {num(p.get('layout_throughput_phase'), '{:.3f}')}（{pct(p.get('throughput_gain_phase'))}） | "
               f"{num(sec(p['direct_p95_ms']), '{:.1f}')} → {num(sec(p['layout_p95_ms']), '{:.1f}')}（{pct(-float(p['p95_cut']) if p['p95_cut'] else None)}） | "
               f"{same_or_dash('direct', p)} |")
     print("\nMonolithic 对 Direct 的差别预计很小（每题主线程多几毫秒），两轮之间的波动可能比它大；看下面“每题主线程忙多久”一表更准。")
@@ -184,10 +189,12 @@ if pairs_direct:
 pairs_memctx = read_csv(OUT / "pairs-memctx.csv")
 if pairs_memctx:
     print("\n## 合并对照：MEMORY 和 CONTEXT 合进一个进程 对 各占一个进程（同一轮、同一并发，2 核）\n")
-    print("| 轮 | 吞吐：两个都拆 → 合进一个进程（变化） | 每题用时 p95：两个都拆 → 合进一个进程（变化） | 请求逐字相同 |")
-    print("| --- | --- | --- | --- |")
+    print("| 轮 | 吞吐（两点法）：两个都拆 → 合进一个进程（变化） | 吞吐（整波平均）：两个都拆 → 合进一个进程（变化） | "
+          "每题用时 p95：两个都拆 → 合进一个进程（变化） | 请求逐字相同 |")
+    print("| --- | --- | --- | --- | --- |")
     for p in pairs_memctx:
         print(f"| {p['round']} | {num(p['both_throughput'], '{:.3f}')} → {num(p['memctx_throughput'], '{:.3f}')}（{pct(p['throughput_gain'])}） | "
+              f"{num(p.get('both_throughput_phase'), '{:.3f}')} → {num(p.get('memctx_throughput_phase'), '{:.3f}')}（{pct(p.get('throughput_gain_phase'))}） | "
               f"{num(sec(p['both_p95_ms']), '{:.1f}')} → {num(sec(p['memctx_p95_ms']), '{:.1f}')}（{pct(-float(p['p95_cut']) if p['p95_cut'] else None)}） | "
               f"{p['requests_same'] or '—'} |")
 

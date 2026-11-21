@@ -2,8 +2,10 @@
 # 03_memctx_probe 的全部容器命令（在 Git Bash 里跑）。docs\16 第 4 节。
 #
 #   bash scripts/run.sh infra-up | infra-down       建/删网络，起/停假模型和 Redis
-#   bash scripts/run.sh build-store                 建记忆库（50/100/250/500 个用户）到 Docker 卷
-#   bash scripts/run.sh build-rag-store [a|a500|b]  建 rag 场景的内部知识库（docs\24；a 是正式用的切法 (a) 前 200 题，a500 是全量 500 题（docs\31），默认 b）到同一个卷
+#   bash scripts/run.sh build-store [s42]           建记忆库（50/100/250/500 个用户）到 Docker 卷
+#   bash scripts/run.sh build-rag-store [a|a500|b] [s42]  建 rag 场景的内部知识库（docs\24；a 是正式用的切法 (a) 前 200 题，a500 是全量 500 题（docs\31），默认 b）到同一个卷
+#     不写 s42 是原种子 20261119：数据读 derived/，库写在卷的根目录（11-19 起各轮）；
+#     写 s42 是种子 42（docs\32）：数据读 derived/s42/，库写在卷里的 s42/，和原种子的库分开
 #   bash scripts/run.sh probe <名字> <核> <run.ts 参数...>          阶段一：一个 Monolithic 容器，结果写 RAW_DIR/<名字>.json
 #   bash scripts/run.sh e2e <名字> <布局> <核> <run.ts 参数...>     阶段三：按布局起被拆的 Worker 容器，再起编排器
 #   bash scripts/run.sh cleanup                     删本实验的容器、网络、卷（镜像另删）
@@ -15,8 +17,11 @@ export MSYS_NO_PATHCONV=1
 
 IMAGE=3513d314a207
 # 目录从本脚本的位置推出来：本目录（03_memctx_probe）的上一级是实验根目录。Git Bash 的 pwd -W 给出 Docker 认得的 F:/... 写法。
-PROBE=$(cd "$(dirname "$0")/.." && (pwd -W 2>/dev/null || pwd))
-SEC=${PROBE%/*}
+# PROBE_DIR：挂进容器的程序目录，默认就是本目录。离线并发扫描里“新旧程序对照”（docs\32 第 10 节）用它指向旧版程序的副本，
+# 数据、结果目录仍按本脚本的位置找。
+HERE=$(cd "$(dirname "$0")/.." && (pwd -W 2>/dev/null || pwd))
+SEC=${HERE%/*}
+PROBE=${PROBE_DIR:-$HERE}
 DATA=$SEC/bench_data
 RAW_DIR=${RAW_DIR:-$SEC/_tmp/scratch/memctx/smoke}
 NET=sec1new-memctx-net
@@ -53,26 +58,31 @@ case "${1:-}" in
   infra-down)
     docker rm -f sec1new-memctx-fake sec1new-memctx-redis >/dev/null 2>&1 || true ;;
   build-store)
-    # 写卷要 root（镜像默认用户 1000）。
+    # 写卷要 root（镜像默认用户 1000）。第二个参数 s42：种子 42 的顺序，库写进卷里的 s42/（docs\32）；不写是原种子。
+    sub=${2:-}; case "$sub" in ""|s42) ;; *) echo "第二个参数只能是 s42 或不写，不是 $sub" >&2; exit 2 ;; esac
+    d=/data/longmemeval-s/derived${sub:+/$sub} o=/store${sub:+/$sub}
     docker run --rm --network none --user 0 --cpuset-cpus 2 --memory 6g \
       --mount "type=bind,src=$PROBE,dst=/probe,readonly" --workdir /probe --mount "type=bind,src=$DATA,dst=/data,readonly" \
       --mount "type=volume,src=$VOL,dst=/store" --entrypoint /bin/sh "$IMAGE" -c \
-      'node --max-old-space-size=4096 src/build-store.ts --tasks /data/longmemeval-s/derived/memctx-lme.jsonl --order /data/longmemeval-s/derived/memctx-lme-order.json --scales 50,100,250,500 --out /store && chmod 0444 /store/*.sqlite && ls -la /store' ;;
+      "mkdir -p $o && node --max-old-space-size=4096 src/build-store.ts --tasks /data/longmemeval-s/derived/memctx-lme.jsonl --order $d/memctx-lme-order.json --scales 50,100,250,500 --out $o && chmod 0444 $o/*.sqlite && ls -la $o" ;;
   build-rag-store)
     # rag 场景的内部知识库（docs\24）。第二个参数是切法（先跑 node src/prepare-rag.ts --cut <切法> 生成数据）：
     #   a（正式用）：rag-a-first200.knowledge.jsonl → /store/rag-a-first200.sqlite
     #   a500（全量 500 题，docs\31；先跑 node src/prepare-rag.ts --cut a ... --prefix rag-a-all500）：rag-a-all500.knowledge.jsonl → /store/rag-a-all500.sqlite
     #   b（默认，11-19 的离线测量）：rag-lme-first200.knowledge.jsonl → /store/rag-first200.sqlite
+    # 第三个参数 s42：数据读 derived/s42/，库写进卷里的 s42/（docs\32；只有切法 a、a500）；不写是原种子。
+    sub=${3:-}; case "$sub" in ""|s42) ;; *) echo "第三个参数只能是 s42 或不写，不是 $sub" >&2; exit 2 ;; esac
     case "${2:-b}" in
       a) data=rag-a-first200 store=rag-a-first200 ;;
       a500) data=rag-a-all500 store=rag-a-all500 ;;
-      b) data=rag-lme-first200 store=rag-first200 ;;
+      b) [ -z "$sub" ] || { echo "切法 (b) 只有原种子的数据" >&2; exit 2; }; data=rag-lme-first200 store=rag-first200 ;;
       *) echo "切法是 a、a500 或 b，不是 $2" >&2; exit 2 ;;
     esac
+    d=/data/longmemeval-s/derived${sub:+/$sub} o=/store${sub:+/$sub}
     docker run --rm --network none --user 0 --cpuset-cpus 2 --memory 6g \
       --mount "type=bind,src=$PROBE,dst=/probe,readonly" --workdir /probe --mount "type=bind,src=$DATA,dst=/data,readonly" \
       --mount "type=volume,src=$VOL,dst=/store" --entrypoint /bin/sh "$IMAGE" -c \
-      "node --max-old-space-size=4096 src/build-rag-store.ts --knowledge /data/longmemeval-s/derived/$data.knowledge.jsonl --out /store/$store.sqlite && chmod 0444 /store/$store.sqlite && ls -la /store/$store.sqlite" ;;
+      "mkdir -p $o && node --max-old-space-size=4096 src/build-rag-store.ts --knowledge $d/$data.knowledge.jsonl --out $o/$store.sqlite && chmod 0444 $o/$store.sqlite && ls -la $o/$store.sqlite" ;;
   probe)
     name=${2:?名字}; cores=${3:?核}; shift 3
     mkdir -p "$RAW_DIR"

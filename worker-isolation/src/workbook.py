@@ -39,6 +39,12 @@ NAMES = {
     "memctx_loop_delay_p99_ms": "MEMORY+CONTEXT进程事件循环延迟p99(ms)", "memctx_mem_peak_mb": "MEMORY+CONTEXT进程内存峰值(MB)",
     "interaction_main_busy_share": "INTERACTION进程主线程忙比例", "interaction_cores_used": "INTERACTION进程用核",
     "interaction_loop_delay_p99_ms": "INTERACTION进程事件循环延迟p99(ms)", "interaction_mem_peak_mb": "INTERACTION进程内存峰值(MB)",
+    # 吞吐的第二种算法：整波平均（docs\\34 第 3.1 节）；上面不带“整波平均”的吞吐都是两点法
+    "throughput_phase_avg": "吞吐_整波平均(题/s)", "throughput_gain_phase": "吞吐提高_整波平均",
+    "mono_throughput_phase": "Monolithic吞吐_整波平均(题/s)", "split_throughput_phase": "拆开吞吐_整波平均(题/s)",
+    "direct_throughput_phase": "Direct吞吐_整波平均(题/s)", "layout_throughput_phase": "这一布局吞吐_整波平均(题/s)",
+    "both_throughput": "两个都拆吞吐(题/s)", "memctx_throughput": "合并吞吐(题/s)",
+    "both_throughput_phase": "两个都拆吞吐_整波平均(题/s)", "memctx_throughput_phase": "合并吞吐_整波平均(题/s)",
 }
 
 

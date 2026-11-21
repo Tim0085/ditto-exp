@@ -1,5 +1,6 @@
 // 各入口共用的常量和规则。docs\16 第 3 节。
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 
 /** 模型提示词。两种布局完全相同；假模型按第一句判断是哪一步。 */
 export const KEYWORD_INSTRUCTION =
@@ -115,6 +116,20 @@ export async function* jsonLines(file: string): AsyncGenerator<string> {
     for (const line of parts) if (line.trim()) yield line;
   }
   if (rest.trim()) yield rest;
+}
+
+/**
+ * 写数据文件，不覆盖已有的数据（docs\32 第 2.1 节）：文件已经存在时，内容逐字节相同就不重写，不同就报错停下。
+ * 新文件先写成 <文件>.partial 再改名，写到一半断了也不会留下半截的正式文件。
+ */
+export function writeNew(file: string, text: string): void {
+  const bytes = Buffer.from(text, "utf8");
+  if (existsSync(file)) {
+    if (readFileSync(file).equals(bytes)) { console.error(`已有、内容相同，不重写：${file}`); return; }
+    throw new Error(`${file} 已经存在而且内容不同：不覆盖（换了数据就写到另外的目录）`);
+  }
+  writeFileSync(`${file}.partial`, bytes);
+  renameSync(`${file}.partial`, file);
 }
 
 export function arg(name: string, fallback?: string): string {
